@@ -19,9 +19,6 @@ messages_collection = db['messages']
 # Store for active bot scripts
 bot_scripts = {}
 
-# Store for processed update IDs to prevent duplicates
-processed_updates = set()
-
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
@@ -234,22 +231,6 @@ def webhook(bot_token):
     try:
         update = request.json
         
-        # Check for duplicate update_id
-        update_id = update.get('update_id')
-        if update_id:
-            # Create unique key combining bot_token and update_id
-            update_key = f"{bot_token}:{update_id}"
-            
-            if update_key in processed_updates:
-                # Already processed this update, skip it
-                return jsonify({'ok': True, 'status': 'duplicate_skipped'})
-            
-            # Add to processed set (keep last 1000 to prevent memory issues)
-            processed_updates.add(update_key)
-            if len(processed_updates) > 1000:
-                # Remove oldest entries
-                processed_updates.pop()
-        
         # Find bot by token
         bot = bots_collection.find_one({'bot_token': bot_token})
         
@@ -398,7 +379,7 @@ class HTTPClient:
 def execute_bot_script(script, message_data, bot_token):
     """
     Execute user-defined bot script
-    Script should define on_message(message) function
+    The script should handle its own execution flow
     """
     try:
         # Create message object
@@ -445,18 +426,8 @@ def execute_bot_script(script, message_data, bot_token):
             'ReturnCommand': ReturnCommand,
         }
         
-        # Execute the script
+        # Execute the script - it will call on_message(message) itself
         exec(script, safe_globals)
-        
-        # Call on_message if it exists
-        if 'on_message' in safe_globals:
-            safe_globals['on_message'](message)
-        else:
-            # Fallback: try to find and call handle_message
-            if 'handle_message' in safe_globals:
-                safe_globals['handle_message'](message.text, message)
-            else:
-                bot.sendMessage(chat_id=message.chat.id, text=f"Echo: {message.text}")
             
     except ReturnCommand:
         # Script requested to stop execution
