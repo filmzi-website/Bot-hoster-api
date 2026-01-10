@@ -1,0 +1,254 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from pymongo import MongoClient
+import requests
+import os
+from datetime import datetime
+import hashlib
+
+app = Flask(__name__)
+CORS(app)
+
+# MongoDB connection
+MONGO_URI = "mongodb+srv://dsadeepa02_db_user:zero8907@cluster0.nfiluqd.mongodb.net/?appName=Cluster0"
+client = MongoClient(MONGO_URI)
+db = client['telegram_bots']
+bots_collection = db['bots']
+messages_collection = db['messages']
+
+# Store for active bot scripts
+bot_scripts = {}
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        'status': 'active',
+        'service': 'Telegram Bot Hosting API',
+        'endpoints': {
+            'POST /api/bot/create': 'Create a new bot',
+            'POST /api/bot/update': 'Update bot script',
+            'GET /api/bot/<bot_id>': 'Get bot details',
+            'POST /api/webhook/<bot_token>': 'Telegram webhook endpoint',
+            'GET /api/bots': 'List all bots',
+            'DELETE /api/bot/<bot_id>': 'Delete a bot'
+        }
+    })
+
+@app.route('/api/bot/create', methods=['POST'])
+def create_bot():
+    try:
+        data = request.json
+        bot_token = data.get('bot_token')
+        bot_script = data.get('script')
+        bot_name = data.get('name', 'Unnamed Bot')
+        
+        if not bot_token or not bot_script:
+            return jsonify({'error': 'bot_token and script are required'}), 400
+        
+        # Verify bot token with Telegram
+        verify_url = f"https://api.telegram.org/bot{bot_token}/getMe"
+        response = requests.get(verify_url)
+        
+        if not response.json().get('ok'):
+            return jsonify({'error': 'Invalid bot token'}), 400
+        
+        bot_info = response.json()['result']
+        bot_id = hashlib.md5(bot_token.encode()).hexdigest()[:12]
+        
+        # Store bot in database
+        bot_data = {
+            'bot_id': bot_id,
+            'bot_token': bot_token,
+            'bot_username': bot_info.get('username'),
+            'bot_name': bot_name,
+            'script': bot_script,
+            'created_at': datetime.utcnow(),
+            'updated_at': datetime.utcnow(),
+            'active': True
+        }
+        
+        bots_collection.update_one(
+            {'bot_id': bot_id},
+            {'$set': bot_data},
+            upsert=True
+        )
+        
+        # Load script into memory
+        bot_scripts[bot_id] = bot_script
+        
+        # Set webhook
+        webhook_url = f"{request.host_url}api/webhook/{bot_token}"
+        set_webhook_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+        webhook_response = requests.post(set_webhook_url, json={'url': webhook_url})
+        
+        return jsonify({
+            'success': True,
+            'bot_id': bot_id,
+            'bot_username': bot_info.get('username'),
+            'webhook_url': webhook_url,
+            'webhook_set': webhook_response.json().get('ok', False)
+        }), 201
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/bot/update', methods=['POST'])
+def update_bot():
+    try:
+        data = request.json
+        bot_id = data.get('bot_id')
+        bot_script = data.get('script')
+        
+        if not bot_id or not bot_script:
+            return jsonify({'error': 'bot_id and script are required'}), 400
+        
+        # Update in database
+        result = bots_collection.update_one(
+            {'bot_id': bot_id},
+            {'$set': {
+                'script': bot_script,
+                'updated_at': datetime.utcnow()
+            }}
+        )
+        
+        if result.matched_count == 0:
+            return jsonify({'error': 'Bot not found'}), 404
+        
+        # Update in memory
+        bot_scripts[bot_id] = bot_script
+        
+        return jsonify({'success': True, 'message': 'Bot script updated'})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/bot/<bot_id>', methods=['GET'])
+def get_bot(bot_id):
+    try:
+        bot = bots_collection.find_one({'bot_id': bot_id}, {'_id': 0, 'bot_token': 0})
+        
+        if not bot:
+            return jsonify({'error': 'Bot not found'}), 404
+        
+        return jsonify(bot)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/bots', methods=['GET'])
+def list_bots():
+    try:
+        bots = list(bots_collection.find({}, {'_id': 0, 'bot_token': 0, 'script': 0}))
+        return jsonify({'bots': bots, 'count': len(bots)})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/bot/<bot_id>', methods=['DELETE'])
+def delete_bot(bot_id):
+    try:
+        bot = bots_collection.find_one({'bot_id': bot_id})
+        
+        if not bot:
+            return jsonify({'error': 'Bot not found'}), 404
+        
+        # Remove webhook
+        bot_token = bot['bot_token']
+        delete_webhook_url = f"https://api.telegram.org/bot{bot_token}/deleteWebhook"
+        requests.post(delete_webhook_url)
+        
+        # Delete from database
+        bots_collection.delete_one({'bot_id': bot_id})
+        
+        # Remove from memory
+        if bot_id in bot_scripts:
+            del bot_scripts[bot_id]
+        
+        return jsonify({'success': True, 'message': 'Bot deleted'})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/webhook/<bot_token>', methods=['POST'])
+def webhook(bot_token):
+    try:
+        update = request.json
+        
+        # Find bot by token
+        bot = bots_collection.find_one({'bot_token': bot_token})
+        
+        if not bot:
+            return jsonify({'error': 'Bot not found'}), 404
+        
+        bot_id = bot['bot_id']
+        script = bot_scripts.get(bot_id, bot['script'])
+        
+        # Store message
+        messages_collection.insert_one({
+            'bot_id': bot_id,
+            'update': update,
+            'timestamp': datetime.utcnow()
+        })
+        
+        # Process message with user's script
+        if 'message' in update:
+            message = update['message']
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            
+            # Execute user's script logic
+            response_text = execute_bot_script(script, text, message)
+            
+            # Send response
+            send_message(bot_token, chat_id, response_text)
+        
+        return jsonify({'ok': True})
+        
+    except Exception as e:
+        print(f"Webhook error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+def execute_bot_script(script, text, message):
+    """
+    Execute user-defined script safely
+    Script should define a function: handle_message(text, message)
+    """
+    try:
+        # Create safe execution environment
+        safe_globals = {
+            '__builtins__': {
+                'len': len,
+                'str': str,
+                'int': int,
+                'float': float,
+                'bool': bool,
+                'list': list,
+                'dict': dict,
+                'print': print,
+            }
+        }
+        
+        # Execute the script
+        exec(script, safe_globals)
+        
+        # Call the handle_message function if it exists
+        if 'handle_message' in safe_globals:
+            return safe_globals['handle_message'](text, message)
+        else:
+            return "Echo: " + text
+            
+    except Exception as e:
+        return f"Script error: {str(e)}"
+
+def send_message(bot_token, chat_id, text):
+    """Send message via Telegram API"""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    data = {
+        'chat_id': chat_id,
+        'text': text
+    }
+    requests.post(url, json=data)
+
+# For Vercel serverless deployment
+if __name__ == '__main__':
+    app.run(debug=True)
