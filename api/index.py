@@ -19,6 +19,9 @@ messages_collection = db['messages']
 # Store for active bot scripts
 bot_scripts = {}
 
+# Store for processed update IDs to prevent duplicates
+processed_updates = set()
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
@@ -230,6 +233,22 @@ def delete_bot(bot_id):
 def webhook(bot_token):
     try:
         update = request.json
+        
+        # Check for duplicate update_id
+        update_id = update.get('update_id')
+        if update_id:
+            # Create unique key combining bot_token and update_id
+            update_key = f"{bot_token}:{update_id}"
+            
+            if update_key in processed_updates:
+                # Already processed this update, skip it
+                return jsonify({'ok': True, 'status': 'duplicate_skipped'})
+            
+            # Add to processed set (keep last 1000 to prevent memory issues)
+            processed_updates.add(update_key)
+            if len(processed_updates) > 1000:
+                # Remove oldest entries
+                processed_updates.pop()
         
         # Find bot by token
         bot = bots_collection.find_one({'bot_token': bot_token})
