@@ -192,15 +192,7 @@ def webhook(bot_token):
         
         # Process message with user's script
         if 'message' in update:
-            message = update['message']
-            chat_id = message['chat']['id']
-            text = message.get('text', '')
-            
-            # Execute user's script logic
-            response_text = execute_bot_script(script, text, message)
-            
-            # Send response
-            send_message(bot_token, chat_id, response_text)
+            execute_bot_script(script, update['message'], bot_token)
         
         return jsonify({'ok': True})
         
@@ -208,12 +200,73 @@ def webhook(bot_token):
         print(f"Webhook error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-def execute_bot_script(script, text, message):
+class ReturnCommand(Exception):
+    """Exception to stop script execution"""
+    pass
+
+class MessageObject:
+    """Mock message object for bot scripts"""
+    def __init__(self, message_data):
+        self.text = message_data.get('text', '')
+        self.chat = type('Chat', (), {
+            'id': message_data['chat']['id'],
+            'type': message_data['chat'].get('type', 'private')
+        })()
+        self.from_user = message_data.get('from', {})
+        self.message_id = message_data.get('message_id')
+        self.date = message_data.get('date')
+        self._raw_data = message_data
+
+class BotAPI:
+    """Mock bot API for sending messages"""
+    def __init__(self, bot_token):
+        self.bot_token = bot_token
+        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+    
+    def sendMessage(self, chat_id, text, parse_mode=None):
+        """Send a message to a chat"""
+        url = f"{self.base_url}/sendMessage"
+        data = {
+            'chat_id': chat_id,
+            'text': text
+        }
+        if parse_mode:
+            data['parse_mode'] = parse_mode
+        
+        try:
+            response = requests.post(url, json=data)
+            return response.json()
+        except Exception as e:
+            print(f"Error sending message: {str(e)}")
+            return None
+
+class HTTPClient:
+    """Mock HTTP client for making requests"""
+    @staticmethod
+    def get(url, **kwargs):
+        """Make GET request"""
+        return requests.get(url, **kwargs)
+    
+    @staticmethod
+    def post(url, **kwargs):
+        """Make POST request"""
+        return requests.post(url, **kwargs)
+
+def execute_bot_script(script, message_data, bot_token):
     """
-    Execute user-defined script safely
-    Script should define a function: handle_message(text, message)
+    Execute user-defined bot script
+    Script should define on_message(message) function
     """
     try:
+        # Create message object
+        message = MessageObject(message_data)
+        
+        # Create bot API instance
+        bot = BotAPI(bot_token)
+        
+        # Create HTTP client
+        HTTP = HTTPClient()
+        
         # Create safe execution environment
         safe_globals = {
             '__builtins__': {
@@ -224,30 +277,45 @@ def execute_bot_script(script, text, message):
                 'bool': bool,
                 'list': list,
                 'dict': dict,
+                'tuple': tuple,
+                'range': range,
+                'enumerate': enumerate,
+                'zip': zip,
                 'print': print,
-            }
+                'Exception': Exception,
+            },
+            'bot': bot,
+            'HTTP': HTTP,
+            'message': message,
+            'ReturnCommand': ReturnCommand,
         }
         
         # Execute the script
         exec(script, safe_globals)
         
-        # Call the handle_message function if it exists
-        if 'handle_message' in safe_globals:
-            return safe_globals['handle_message'](text, message)
+        # Call on_message if it exists
+        if 'on_message' in safe_globals:
+            safe_globals['on_message'](message)
         else:
-            return "Echo: " + text
+            # Fallback: try to find and call handle_message
+            if 'handle_message' in safe_globals:
+                safe_globals['handle_message'](message.text, message)
+            else:
+                bot.sendMessage(chat_id=message.chat.id, text=f"Echo: {message.text}")
             
+    except ReturnCommand:
+        # Script requested to stop execution
+        pass
     except Exception as e:
-        return f"Script error: {str(e)}"
-
-def send_message(bot_token, chat_id, text):
-    """Send message via Telegram API"""
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = {
-        'chat_id': chat_id,
-        'text': text
-    }
-    requests.post(url, json=data)
+        print(f"Script execution error: {str(e)}")
+        try:
+            bot = BotAPI(bot_token)
+            bot.sendMessage(
+                chat_id=message_data['chat']['id'],
+                text=f"❌ Bot script error: {str(e)}"
+            )
+        except:
+            pass
 
 # For Vercel serverless deployment
 if __name__ == '__main__':
