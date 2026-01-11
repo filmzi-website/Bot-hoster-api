@@ -5,6 +5,7 @@ import requests
 import os
 from datetime import datetime
 import hashlib
+import json
 
 app = Flask(__name__)
 CORS(app)
@@ -24,6 +25,7 @@ def home():
     return jsonify({
         'status': 'active',
         'service': 'Telegram Bot Hosting API',
+        'version': '2.0',
         'endpoints': {
             'POST /api/bot/create': 'Create a new bot',
             'POST /api/bot/update': 'Update bot script',
@@ -240,16 +242,18 @@ def webhook(bot_token):
         bot_id = bot['bot_id']
         script = bot_scripts.get(bot_id, bot['script'])
         
-        # Store message
+        # Store message/callback
         messages_collection.insert_one({
             'bot_id': bot_id,
             'update': update,
             'timestamp': datetime.utcnow()
         })
         
-        # Process message with user's script
+        # Process message or callback query
         if 'message' in update:
-            execute_bot_script(script, update['message'], bot_token)
+            execute_bot_script(script, update, bot_token, 'message')
+        elif 'callback_query' in update:
+            execute_bot_script(script, update, bot_token, 'callback_query')
         
         return jsonify({'ok': True})
         
@@ -277,8 +281,41 @@ class MessageObject:
         self.date = message_data.get('date')
         self._raw_data = message_data
 
+class CallbackQueryObject:
+    """Mock callback query object for inline button clicks"""
+    def __init__(self, callback_data):
+        self.id = callback_data.get('id')
+        self.data = callback_data.get('data', '')
+        self.message = MessageObject(callback_data.get('message', {})) if 'message' in callback_data else None
+        self.from_user = callback_data.get('from', {})
+        self.chat_instance = callback_data.get('chat_instance')
+        self._raw_data = callback_data
+
+class InlineKeyboardMarkup:
+    """Helper class to create inline keyboards"""
+    def __init__(self, inline_keyboard):
+        self.inline_keyboard = inline_keyboard
+    
+    def to_dict(self):
+        return {'inline_keyboard': self.inline_keyboard}
+
+class InlineKeyboardButton:
+    """Helper class to create inline keyboard buttons"""
+    def __init__(self, text, callback_data=None, url=None):
+        self.text = text
+        self.callback_data = callback_data
+        self.url = url
+    
+    def to_dict(self):
+        button = {'text': self.text}
+        if self.callback_data:
+            button['callback_data'] = self.callback_data
+        if self.url:
+            button['url'] = self.url
+        return button
+
 class BotAPI:
-    """Mock bot API for sending messages and photos"""
+    """Mock bot API for sending messages and handling callbacks"""
     def __init__(self, bot_token):
         self.bot_token = bot_token
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -293,13 +330,57 @@ class BotAPI:
         if parse_mode:
             data['parse_mode'] = parse_mode
         if reply_markup:
-            data['reply_markup'] = reply_markup
+            if isinstance(reply_markup, InlineKeyboardMarkup):
+                data['reply_markup'] = reply_markup.to_dict()
+            else:
+                data['reply_markup'] = reply_markup
         
         try:
             response = requests.post(url, json=data, timeout=10)
             return response.json()
         except Exception as e:
             print(f"Error sending message: {str(e)}")
+            return None
+    
+    def editMessageText(self, chat_id, message_id, text, parse_mode=None, reply_markup=None):
+        """Edit a message text"""
+        url = f"{self.base_url}/editMessageText"
+        data = {
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'text': text
+        }
+        if parse_mode:
+            data['parse_mode'] = parse_mode
+        if reply_markup:
+            if isinstance(reply_markup, InlineKeyboardMarkup):
+                data['reply_markup'] = reply_markup.to_dict()
+            else:
+                data['reply_markup'] = reply_markup
+        
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            return response.json()
+        except Exception as e:
+            print(f"Error editing message: {str(e)}")
+            return None
+    
+    def answerCallbackQuery(self, callback_query_id, text=None, show_alert=False):
+        """Answer a callback query"""
+        url = f"{self.base_url}/answerCallbackQuery"
+        data = {
+            'callback_query_id': callback_query_id
+        }
+        if text:
+            data['text'] = text
+        if show_alert:
+            data['show_alert'] = show_alert
+        
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            return response.json()
+        except Exception as e:
+            print(f"Error answering callback: {str(e)}")
             return None
     
     def sendPhoto(self, chat_id, photo, caption=None, parse_mode=None, reply_markup=None):
@@ -314,7 +395,10 @@ class BotAPI:
         if parse_mode:
             data['parse_mode'] = parse_mode
         if reply_markup:
-            data['reply_markup'] = reply_markup
+            if isinstance(reply_markup, InlineKeyboardMarkup):
+                data['reply_markup'] = reply_markup.to_dict()
+            else:
+                data['reply_markup'] = reply_markup
         
         try:
             response = requests.post(url, json=data, timeout=30)
@@ -323,7 +407,7 @@ class BotAPI:
             print(f"Error sending photo: {str(e)}")
             return None
     
-    def sendDocument(self, chat_id, document, caption=None, parse_mode=None):
+    def sendDocument(self, chat_id, document, caption=None, parse_mode=None, reply_markup=None):
         """Send a document to a chat"""
         url = f"{self.base_url}/sendDocument"
         data = {
@@ -334,12 +418,32 @@ class BotAPI:
             data['caption'] = caption
         if parse_mode:
             data['parse_mode'] = parse_mode
+        if reply_markup:
+            if isinstance(reply_markup, InlineKeyboardMarkup):
+                data['reply_markup'] = reply_markup.to_dict()
+            else:
+                data['reply_markup'] = reply_markup
         
         try:
             response = requests.post(url, json=data, timeout=30)
             return response.json()
         except Exception as e:
             print(f"Error sending document: {str(e)}")
+            return None
+    
+    def deleteMessage(self, chat_id, message_id):
+        """Delete a message"""
+        url = f"{self.base_url}/deleteMessage"
+        data = {
+            'chat_id': chat_id,
+            'message_id': message_id
+        }
+        
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            return response.json()
+        except Exception as e:
+            print(f"Error deleting message: {str(e)}")
             return None
 
 class HTTPResponse:
@@ -376,20 +480,25 @@ class HTTPClient:
         response = requests.post(url, **kwargs)
         return HTTPResponse(response)
 
-def execute_bot_script(script, message_data, bot_token):
+def execute_bot_script(script, update_data, bot_token, update_type):
     """
     Execute user-defined bot script
     The script should handle its own execution flow
     """
     try:
-        # Create message object
-        message = MessageObject(message_data)
-        
         # Create bot API instance
         bot = BotAPI(bot_token)
         
         # Create HTTP client
         HTTP = HTTPClient()
+        
+        # Create message or callback query object
+        if update_type == 'message':
+            message = MessageObject(update_data['message'])
+            callback_query = None
+        else:
+            callback_query = CallbackQueryObject(update_data['callback_query'])
+            message = callback_query.message
         
         # Create safe execution environment with more built-ins
         safe_globals = {
@@ -414,6 +523,7 @@ def execute_bot_script(script, message_data, bot_token):
                 'sorted': sorted,
                 'reversed': reversed,
                 'print': print,
+                'json': json,
                 'Exception': Exception,
                 'KeyError': KeyError,
                 'ValueError': ValueError,
@@ -423,10 +533,13 @@ def execute_bot_script(script, message_data, bot_token):
             'bot': bot,
             'HTTP': HTTP,
             'message': message,
+            'callback_query': callback_query,
             'ReturnCommand': ReturnCommand,
+            'InlineKeyboardMarkup': InlineKeyboardMarkup,
+            'InlineKeyboardButton': InlineKeyboardButton,
         }
         
-        # Execute the script - it will call on_message(message) itself
+        # Execute the script - it will call on_message or on_callback_query itself
         exec(script, safe_globals)
             
     except ReturnCommand:
@@ -438,10 +551,17 @@ def execute_bot_script(script, message_data, bot_token):
         traceback.print_exc()
         try:
             bot = BotAPI(bot_token)
-            bot.sendMessage(
-                chat_id=message_data['chat']['id'],
-                text=f"❌ Bot script error: {str(e)}"
-            )
+            if update_type == 'message':
+                bot.sendMessage(
+                    chat_id=update_data['message']['chat']['id'],
+                    text=f"❌ Bot script error: {str(e)}"
+                )
+            else:
+                bot.answerCallbackQuery(
+                    callback_query_id=update_data['callback_query']['id'],
+                    text=f"❌ Error: {str(e)}",
+                    show_alert=True
+                )
         except:
             pass
 
