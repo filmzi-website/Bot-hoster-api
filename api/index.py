@@ -12,7 +12,7 @@ app = Flask(__name__)
 CORS(app)
 
 # MongoDB connection
-MONGO_URI = "mongodb+srv://dsadeepa02_db_user:zero8907@cluster0.nfiluqd.mongodb.net/?appName=Cluster0"
+MONGO_URI = "mongodb+srv://Zerobothost:zerobothost@cluster0.bl0tf2.mongodb.net/?appName=Cluster0"
 client = MongoClient(MONGO_URI)
 db = client['telegram_bots']
 bots_collection = db['bots']
